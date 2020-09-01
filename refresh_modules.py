@@ -3,13 +3,12 @@
 import argparse
 import ast
 import collections
-import io
 import json
 import re
 import pathlib
 import subprocess
 import astunparse
-from ruamel.yaml import YAML
+import os
 
 
 def normalize_description(string_list):
@@ -48,10 +47,10 @@ def python_type(value):
 def gen_documentation(name, description, parameters):
 
     documentation = {
-        "author": ["Ansible VMware team"],
+        "author": [],
         "description": description,
         "module": name,
-        "notes": ["Tested on vSphere 7.0"],
+        "notes": [],
         "options": {},
         "requirements": ["python >= 3.6"],
         "short_description": description,
@@ -115,31 +114,21 @@ def format_documentation(documentation):
 
 
 def path_to_name(path):
-    def is_element(i):
-        if i and "{" not in i:
-            return True
-        else:
-            return False
-
     _path = path.split("?")[0]
 
-    elements = [i for i in _path.split("/") if is_element(i)]
-    # workaround for vcenter_vm_power
-    if elements[-1] in ("stop", "start", "suspend", "reset"):
-        elements = elements[:-1]
-    if elements[0:3] == ["rest", "com", "vmware"]:
-        elements = elements[3:]
-    elif elements[0:2] == ["rest", "hvc"]:
-        elements = elements[1:]
-    elif elements[0:2] == ["rest", "appliance"]:
-        elements = elements[1:]
-    elif elements[0:2] == ["rest", "vcenter"]:
-        elements = elements[1:]
-    elif elements[:1] == ["api"]:
+    elements = [i for i in _path.split("/") if i != ""]
+
+    for idx, element in enumerate(elements):
+        if "{" in element:
+            elements[idx] = (
+                f"by_{element}".replace("{", "").replace("}", "").replace("=", "_eq_").replace(":", "_").lower()
+            )
+
+    if elements[:1] == ["data"]:
         elements = elements[1:]
 
-    module_name = "_".join(elements)
-    return module_name.replace("-", "")
+    module_name = "_".join(elements).replace("-", "_").replace(":", "_").lower()
+    return module_name
 
 
 def gen_arguments_py(parameters, list_index=None):
@@ -154,11 +143,6 @@ def gen_arguments_py(parameters, list_index=None):
     for parameter in parameters:
         assign = ast.parse(ARGUMENT_TPL.format(name=parameter["name"])).body[0]
 
-        # if None and list_index:
-        #     assign = ast.parse(ARGUMENT_TPL.format(name=list_index)).body[0]
-        #     _add_key(assign, "aliases", [parameter["name"]])
-        #     parameter["name"] = list_index
-
         if parameter["name"] in ["user_name", "username", "password"]:
             _add_key(assign, "nolog", True)
 
@@ -168,10 +152,6 @@ def gen_arguments_py(parameters, list_index=None):
             else:
                 _add_key(assign, "required", True)
 
-        # "bus" option defaulting on 0
-        if parameter["name"] == "bus":
-            _add_key(assign, "default", 0)
-
         _add_key(assign, "type", python_type(parameter["type"]))
         if "enum" in parameter:
             _add_key(assign, "choices", sorted(parameter["enum"]))
@@ -180,24 +160,6 @@ def gen_arguments_py(parameters, list_index=None):
             _add_key(assign, "operationIds", sorted(parameter["operationIds"]))
 
         yield assign
-
-
-def filter_out_trusted_modules(modules):
-    trusted_module_allowlist = [
-        "vcenter_vm.*",
-        "vcenter_folder_info",
-        "vcenter_cluster_info",
-        "vcenter_datacenter",
-        "vcenter_datacenter_info",
-        "vcenter_datastore_info",
-        "vcenter_network_info",
-    ]
-
-    regexes = [re.compile(i) for i in trusted_module_allowlist]
-    for m in modules:
-        if any([r.match(m) for r in regexes]):
-            continue
-        yield m
 
 
 class Resource:
@@ -272,9 +234,14 @@ class AnsibleModuleBase:
                     len(set(self.default_operationIds) - set(result["operationIds"]))
                     > 0
                 ):
-                    result["description"] += " Required with I(state={})".format(
-                        sorted(set(result["operationIds"]))
-                    )
+                    if "description" in result:
+                        result["description"] += " Required with I(state={})".format(
+                            sorted(set(result["operationIds"]))
+                        )
+                    else:
+                        result["description"] = "Required with I(state={})".format(
+                            sorted(set(result["operationIds"]))
+                        )
                 del result["required"]
                 result["required_if"] = sorted(set(result["operationIds"]))
 
@@ -290,11 +257,8 @@ class AnsibleModuleBase:
     def gen_url_func(self):
         first_operation = list(self.resource.operations.values())[0]
         path = first_operation[1]
-
-        if not path.startswith("/rest"):  # Pre 7.0.0
-            path = "/rest" + path
-
-        url_func = ast.parse(self.URL.format(path=path)).body[0]
+        basePath = first_operation[3]
+        url_func = ast.parse(self.URL.format(path=path, basePath=basePath)).body[0]
         return url_func
 
     @staticmethod
@@ -333,23 +297,39 @@ class AnsibleModuleBase:
     def _flatten_parameter(parameter_structure, definitions):
         for i in parameter_structure:
             if "schema" in i:
-                schema = definitions.get(i["schema"])
-                for j in AnsibleModule._property_to_parameter(schema, definitions):
-                    yield j
+                if "$ref" in i["schema"]:
+                    schema = definitions.get(i["schema"])
+                    for j in AnsibleModule._property_to_parameter(schema, definitions):
+                        yield j
+                elif "type" in i["schema"]:
+                    i["type"] = i["schema"]["type"]
+                    yield i
             else:
                 yield i
 
     def in_query_parameters(self):
         return [p["name"] for p in self.parameters() if p.get("in") == "query"]
 
-    def gen_main_func(self):
-        raise NotImplementedError()
-
     def renderer(self, target_dir):
-        # syntax_tree = ast.parse(MODULE_TEMPLATE)
         DEFAULT_MODULE = """
+_HEADER='''
 #!/usr/bin/env python
 # Info module template
+
+#############################################
+#                WARNING                    #
+#############################################
+#
+# This file is auto generated by
+#   https://github.com/jgroom33/vmware_rest_code_generator
+#
+# Do not edit this file manually.
+#
+# Changes should be made in the swagger used to
+#   generate this file or in the generator
+#
+#############################################
+'''
 from __future__ import absolute_import, division, print_function
 __metaclass__ = type
 import socket
@@ -365,7 +345,7 @@ try:
     from ansible_module.turbo.module import AnsibleTurboModule as AnsibleModule
 except ImportError:
     from ansible.module_utils.basic import AnsibleModule
-from ansible_collections.vmware.vmware_rest.plugins.module_utils.vmware_rest import (
+from ansible_collections.vendor.app.plugins.module_utils.app import (
     gen_args,
     open_session,
     update_changed_flag)
@@ -374,27 +354,21 @@ from ansible_collections.vmware.vmware_rest.plugins.module_utils.vmware_rest imp
 
 def prepare_argument_spec():
     argument_spec = {{
-        "vcenter_hostname": dict(
+        "app_hostname": dict(
             type='str',
             required=False,
-            fallback=(env_fallback, ['VMWARE_HOST']),
+            fallback=(env_fallback, ['APP_HOST']),
         ),
-        "vcenter_username": dict(
+        "app_username": dict(
             type='str',
             required=False,
-            fallback=(env_fallback, ['VMWARE_USER']),
+            fallback=(env_fallback, ['APP_USER']),
         ),
-        "vcenter_password": dict(
+        "app_password": dict(
             type='str',
             required=False,
             no_log=True,
-            fallback=(env_fallback, ['VMWARE_PASSWORD']),
-        ),
-        "vcenter_certs": dict(
-            type='bool',
-            required=False,
-            no_log=True,
-            fallback=(env_fallback, ['VMWARE_VALIDATE_CERTS']),
+            fallback=(env_fallback, ['APP_PASSWORD']),
         )
     }}
 
@@ -423,23 +397,10 @@ async def list_devices(params, session):
         existing_entries.append((await get_device_info(params, session, _url, _id)))
     return existing_entries
 
-
-async def exists(params, session):
-    unicity_keys = ["bus", "pci_slot_number"]
-    devices = await list_devices(params, session)
-    for device in devices:
-        for k in unicity_keys:
-            if params.get(k) is not None and device.get(k) != params.get(k):
-                break
-        else:
-            return device
-
-
-
 async def main( ):
     module_args = prepare_argument_spec()
     module = AnsibleModule(argument_spec=module_args, supports_check_mode=True)
-    session = await open_session(vcenter_hostname=module.params['vcenter_hostname'], vcenter_username=module.params['vcenter_username'], vcenter_password=module.params['vcenter_password'])
+    session = await open_session(app_hostname=module.params['app_hostname'], app_username=module.params['app_username'], app_password=module.params['app_password'])
     result = await entry_point(module, session)
     module.exit_json(**result)
 
@@ -461,21 +422,12 @@ if __name__ == '__main__':
             gen_documentation(self.name, self.description, self.parameters())
         )
         url_func = self.gen_url_func()
-        # main_func = self.gen_main_func()
         entry_point_func = self.gen_entry_point_func()
 
         in_query_parameters = self.in_query_parameters()
 
         class SumTransformer(ast.NodeTransformer):
             def visit_FunctionDef(self, node):
-
-                return node
-
-            def visit_Assign(self, node):
-
-                if node.targets[0].id == "IN_QUERY_PARAMETER":
-                    node.value = ast.Str(in_query_parameters)
-
                 return node
 
             def visit_FunctionDef(self, node):
@@ -491,8 +443,6 @@ if __name__ == '__main__':
             def visit_Assign(self, node):
                 if not isinstance(node.targets[0], ast.Name):
                     pass
-                # elif node.targets[0].id == "DOCUMENTATION":
-                #     node.value = documentation
                 elif node.targets[0].id == "IN_QUERY_PARAMETER":
                     node.value = ast.Str(in_query_parameters)
                 return node
@@ -507,6 +457,11 @@ if __name__ == '__main__':
             for l in astunparse.unparse(syntax_tree).split("\n"):
                 if l.startswith("DOCUMENTATION ="):
                     fd.write(documentation)
+                elif l.startswith("_HEADER ="):
+                    header_lines = l.split("\\n")
+                    for header_line in header_lines[1:-1]:
+                        fd.write(header_line)
+                        fd.write("\n")
                 else:
                     fd.write(l)
                 fd.write("\n")
@@ -515,15 +470,12 @@ if __name__ == '__main__':
 class AnsibleModule(AnsibleModuleBase):
 
     URL = """
-return "https://{{vcenter_hostname}}{path}".format(**params)
+return "https://{{app_hostname}}{basePath}{path}".format(**params)
 """
 
     def __init__(self, resource, definitions):
         super().__init__(resource, definitions)
-        # TODO: We can probably do better
-        self.default_operationIds = set(list(self.resource.operations.keys())) - set(
-            ["get", "list"]
-        )
+        self.default_operationIds = set(list(self.resource.operations.keys()))
 
     def gen_entry_point_func(self):
         MAIN_FUNC = """
@@ -534,24 +486,18 @@ async def entry_point(module, session):
         main_func = ast.parse(MAIN_FUNC.format(name=self.name))
 
         for operation in sorted(self.default_operationIds):
-            (verb, path, _) = self.resource.operations[operation]
-            if not path.startswith("/rest"):  # TODO
-                path = "/rest" + path
-            if "$" in operation:
-                print(
-                    "skipping operation {operation} for {path}".format(
-                        operation=operation, path=path
-                    )
-                )
-                continue
+            (verb, path, _, basePath) = self.resource.operations[operation]
 
             FUNC_NO_DATA_TPL = """
 async def _{operation}(params, session):
-    _url = "https://{{vcenter_hostname}}{path}".format(**params) + gen_args(params, IN_QUERY_PARAMETER)
+    _url = "https://{{app_hostname}}{basePath}{path}".format(**params) + gen_args(params, IN_QUERY_PARAMETER)
     async with session.{verb}(_url) as resp:
+        content_types = ['application/json-patch+json', 'application/vnd.api+json', 'application/json']
         try:
-            if resp.headers["Content-Type"] == "application/json":
+            if resp.headers["Content-Type"] in content_types:
                 _json = await resp.json()
+            else:
+                print("response Content-Type not supported")
         except KeyError:
             _json = {{}}
         return await update_changed_flag(_json, resp.status, "{operation}")
@@ -560,29 +506,20 @@ async def _{operation}(params, session):
 async def _{operation}(params, session):
     accepted_fields = []
 
-    if "{operation}" == "create":
-        _exists = await exists(params, session)
-        if _exists:
-            return (await update_changed_flag({{"value": _exists}}, 200, 'get'))
-
     spec = {{}}
     for i in accepted_fields:
         if params[i]:
             spec[i] = params[i]
-    _url = "https://{{vcenter_hostname}}{path}".format(**params)
-    async with session.{verb}(_url, json={{'spec': spec}}) as resp:
+    _url = "https://{{app_hostname}}{basePath}{path}".format(**params)
+    async with session.{verb}(_url, json=spec) as resp:
+        content_types = ['application/json-patch+json', 'application/vnd.api+json', 'application/json']
         try:
-            if resp.headers["Content-Type"] == "application/json":
+            if resp.headers["Content-Type"] in content_types:
                 _json = await resp.json()
+            else:
+                print("response Content-Type not supported")
         except KeyError:
             _json = {{}}
-        # Update the value field with all the details
-        if "{operation}" == "create" and (resp.status in [200, 201]) and "value" in _json:
-            if type(_json["value"]) == dict:
-                _id = list(_json["value"].values())[0]
-            else:
-                _id = _json["value"]
-            _json = {{"value": await get_device_info(params, session, _url, _id)}}
 
         return await update_changed_flag(_json, resp.status, "{operation}")
 """
@@ -596,88 +533,23 @@ async def _{operation}(params, session):
 
             if data_accepted_fields:
                 func = ast.parse(
-                    FUNC_WITH_DATA_TPL.format(operation=operation, verb=verb, path=path)
+                    FUNC_WITH_DATA_TPL.format(
+                        operation=operation, verb=verb, path=path, basePath=basePath,
+                    )
                 ).body[0]
                 func.body[0].value.elts = [
                     ast.Constant(value=i, kind=None)
                     for i in sorted(data_accepted_fields)
                 ]
             else:
-                func = ast.parse(
-                    FUNC_NO_DATA_TPL.format(operation=operation, verb=verb, path=path,)
-                ).body[0]
+                code = FUNC_NO_DATA_TPL.format(
+                    operation=operation, verb=verb, path=path, basePath=basePath
+                )
+                func = ast.parse(code).body[0]
 
             main_func.body.append(func)
 
         return main_func.body
-
-
-class AnsibleInfoModule(AnsibleModuleBase):
-
-    URL_WITH_LIST = """
-if params['{list_index}']:
-    return "https://{{vcenter_hostname}}{path}".format(**params) + gen_args(params, IN_QUERY_PARAMETER)
-else:
-    return "https://{{vcenter_hostname}}{list_path}".format(**params) + gen_args(params, IN_QUERY_PARAMETER)
-"""
-
-    URL_LIST_ONLY = """
-return "https://{{vcenter_hostname}}{list_path}".format(**params) + gen_args(params, IN_QUERY_PARAMETER)
-"""
-
-    URL = """
-return "https://{{vcenter_hostname}}{path}".format(**params) + gen_args(params, IN_QUERY_PARAMETER)
-"""
-
-    def __init__(self, resource, definitions):
-        super().__init__(resource, definitions)
-        self.name = resource.name + "_info"
-        self.default_operationIds = ["get", "list"]
-
-    def list_index(self):
-        if "get" not in self.resource.operations:
-            return
-        path = self.resource.operations["get"][1]
-        m = re.search(r"{([-\w]+)}$", path)
-        if m:
-            return m.group(1)
-
-    def parameters(self):
-        return [i for i in list(super().parameters()) if i["name"] != "state"]
-
-    def gen_url_func(self):
-        path = None
-        list_path = None
-        if "get" in self.resource.operations:
-            path = self.resource.operations["get"][1]
-        if "list" in self.resource.operations:
-            list_path = self.resource.operations["list"][1]
-
-        if path and not path.startswith("/rest"):  # Pre 7.0.0
-            path = "/rest" + path
-        if list_path and not list_path.startswith("/rest"):  # Pre 7.0.0
-            list_path = "/rest" + list_path
-
-        if not path:
-            url_func = ast.parse(self.URL_LIST_ONLY.format(list_path=list_path)).body[0]
-        elif list_path and path.endswith("}"):
-            url_func = ast.parse(
-                self.URL_WITH_LIST.format(
-                    path=path, list_path=list_path, list_index=self.list_index(),
-                )
-            ).body[0]
-        else:
-            url_func = ast.parse(self.URL.format(path=path)).body[0]
-        return url_func
-
-    def gen_entry_point_func(self):
-        FUNC = """
-async def entry_point(module, session):
-    async with session.get(url(module.params)) as resp:
-        _json = await resp.json()
-        return await update_changed_flag(_json, resp.status, "get")
-"""
-        return ast.parse(FUNC.format(name=self.name)).body[0]
 
 
 class Definitions:
@@ -685,7 +557,6 @@ class Definitions:
         super().__init__()
         self.definitions = data
 
-    # e.g: #/definitions/com.vmware.vcenter.inventory.datastore_find
     @staticmethod
     def _ref_to_dotted(ref):
         return ref["$ref"].split("/")[2]
@@ -697,9 +568,10 @@ class Definitions:
 
 
 class Path:
-    def __init__(self, path, value):
+    def __init__(self, path, value, basepath):
         super().__init__()
         self.path = path
+        self.basePath = basepath
         self.operations = {}
         self.verb = {}
         self.value = value
@@ -714,22 +586,27 @@ class SwaggerFile:
         self.resources = {}
         with file_path.open() as fd:
             json_content = json.load(fd)
-            self.definitions = Definitions(json_content["definitions"])
-            self.paths = self.load_paths(json_content["paths"])
+            base_path = json_content.get("basePath", "")
+            if base_path == "/":
+                base_path = ""
+            self.basePath = base_path
+            self.definitions = Definitions(json_content.get("definitions", {}))
+            self.paths = self.load_paths(json_content["paths"], base_path)
 
     @staticmethod
-    def load_paths(paths):
+    def load_paths(paths, base_path=""):
         result = {}
 
-        for path in [Path(p, v) for p, v in paths.items()]:
+        for path in [Path(p, v, base_path) for p, v in paths.items()]:
             if path not in paths:
                 result[path.path] = path
             for verb, desc in path.value.items():
-                operationId = desc["operationId"]
+                operationId = verb
                 path.operations[operationId] = (
                     verb,
                     path.path,
-                    desc["parameters"],
+                    desc.get("parameters", {}),
+                    base_path,
                 )
         return result
 
@@ -740,75 +617,52 @@ class SwaggerFile:
             name = path_to_name(path.path)
             if name not in resources:
                 resources[name] = Resource(name)
-                resources[name].description = ""  # path.summary(verb)
+                resources[name].description = ""
 
-            for k, v in path.operations.items():
-                if k in resources[name].operations:
+            for verb, v in path.operations.items():
+                if verb in resources[name].operations:
                     raise Exception(
                         "operationId already defined: %s vs %s"
-                        % (resources[name].operations[k], v)
+                        % (resources[name].operations[verb], v)
                     )
-                k = k.replace(
-                    "$task", ""
-                )  # NOTE: Not sure if this is the right thing to do
-                resources[name].operations[k] = v
+                resources[name].operations[verb] = v
         return resources
 
 
 def main():
 
-    parser = argparse.ArgumentParser(description="Build the vmware_rest modules.")
+    parser = argparse.ArgumentParser(description="Build the modules.")
     parser.add_argument(
-        "--target-dir",
-        dest="target_dir",
-        type=pathlib.Path,
-        default=pathlib.Path("vmware_rest"),
-        help="location of the target repository (default: ./vmware_rest)",
+        "--black",
+        dest="black",
+        type=bool,
+        default=True,
+        help="Whether to format the generated python files with black",
     )
     args = parser.parse_args()
 
-    module_list = []
-    p = pathlib.Path("7.0.0")
-    for json_file in p.glob("*.json"):
-        if str(json_file) == "7.0.0/appliance.json":
-            continue
-        if str(json_file) == "7.0.0/api.json":
-            continue
-        print("Generating modules from {}".format(json_file))
-        swagger_file = SwaggerFile(json_file)
-        resources = swagger_file.init_resources(swagger_file.paths.values())
+    directories = next(os.walk("src/swagger"))[1]
+    for directory in directories:
+        module_list = []
+        p = pathlib.Path("src/swagger/%s" % directory)
+        for json_file in p.glob("*.json"):
+            print("Generating modules from {}".format(json_file))
+            swagger_file = SwaggerFile(json_file)
+            resources = swagger_file.init_resources(swagger_file.paths.values())
 
-        for resource in resources.values():
-            if "get" in resource.operations or "list" in resource.operations:
-                module = AnsibleInfoModule(
-                    resource, definitions=swagger_file.definitions
-                )
+            for resource in resources.values():
+                module = AnsibleModule(resource, definitions=swagger_file.definitions)
                 if len(module.default_operationIds) > 0:
-                    module.renderer(target_dir=args.target_dir)
+                    module.renderer(pathlib.Path(pathlib.Path("build") / directory))
                     module_list.append(module.name)
-            module = AnsibleModule(resource, definitions=swagger_file.definitions)
-            if len(module.default_operationIds) > 0:
-                module.renderer(target_dir=args.target_dir)
-                module_list.append(module.name)
-
-    for module_path in [
-        "{target_dir}/plugins/modules/{module}.py".format(
-            target_dir=args.target_dir, module=m
-        )
-        for m in module_list
-    ]:
-        subprocess.check_call(["black", module_path])
-
-    yaml = YAML()
-    my_galaxy = args.target_dir / "galaxy.yml"
-    galaxy_contents = yaml.load(my_galaxy.open("r"))
-    paths_of_untrusted_modules = [
-        "plugins/modules/{}.py".format(m)
-        for m in filter_out_trusted_modules(module_list)
-    ]
-    galaxy_contents["build_ignore"] = paths_of_untrusted_modules
-    with my_galaxy.open("w") as fd:
-        yaml.dump(galaxy_contents, fd)
+        if args.black:
+            for module_path in [
+                "build/{directory}/plugins/modules/{module}.py".format(
+                    directory=pathlib.Path(directory), module=m
+                )
+                for m in module_list
+            ]:
+                subprocess.check_call(["black", module_path])
 
 
 if __name__ == "__main__":

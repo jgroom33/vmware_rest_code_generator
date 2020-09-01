@@ -23,10 +23,10 @@ my_parameters = [
 
 
 documentation_data_expectation = {
-    "author": ["Ansible VMware team"],
+    "author": [],
     "description": "bar",
     "module": "foo",
-    "notes": ["Tested on vSphere 7.0"],
+    "notes": [],
     "options": {
         "aaa": {
             "description": [
@@ -295,17 +295,17 @@ def test_path_to_name():
     assert rm.path_to_name("/rest/cis/tasks") == "rest_cis_tasks"
     assert (
         rm.path_to_name("/rest/com/vmware/cis/tagging/category")
-        == "cis_tagging_category"
+        == "rest_com_vmware_cis_tagging_category"
     )
     assert (
         rm.path_to_name("/rest/com/vmware/cis/tagging/category/id:{category_id}")
-        == "cis_tagging_category"
+        == "rest_com_vmware_cis_tagging_category"
     )
     assert (
         rm.path_to_name(
             "/rest/com/vmware/cis/tagging/category/id:{category_id}?~action=add-to-used-by"
         )
-        == "cis_tagging_category"
+        == "rest_com_vmware_cis_tagging_category"
     )
     assert (
         rm.path_to_name("/rest/vcenter/vm/{vm}/hardware/ethernet/{nic}/disconnect")
@@ -346,7 +346,7 @@ options:
       it to ensure format_documentation() can break it up.
     type: list
 author:
-- Ansible VMware team
+- Jeff Groom
 version_added: 1.0.0
 requirements:
 - python >= 3.6
@@ -395,15 +395,8 @@ def test_gen_arguments_py(monkeypatch):
     )
 
 
-def test_filter_out_trusted_modules():
-    assert list(rm.filter_out_trusted_modules(["bla_vcenter_vm_a"])) == [
-        "bla_vcenter_vm_a"
-    ]
-    assert list(rm.filter_out_trusted_modules(["vcenter_vm_a"])) == []
-
-
 def test_SwaggerFile_load_paths():
-    paths = rm.SwaggerFile.load_paths(my_raw_paths_data)
+    paths = rm.SwaggerFile.load_paths(my_raw_paths_data, "")
     assert paths["/rest/vcenter/vm"].operations == {
         "list": (
             "get",
@@ -418,12 +411,13 @@ def test_SwaggerFile_load_paths():
                     "type": "array",
                 }
             ],
+            "",
         )
     }
 
 
 def test_SwaggerFile_init_resources():
-    paths = rm.SwaggerFile.load_paths(my_raw_paths_data)
+    paths = rm.SwaggerFile.load_paths(my_raw_paths_data, "")
     resources = rm.SwaggerFile.init_resources(paths.values())
 
     assert resources["vcenter_vm"].name == "vcenter_vm"
@@ -440,6 +434,7 @@ def test_SwaggerFile_init_resources():
                     "type": "string",
                 }
             ],
+            "",
         ),
         "list": (
             "get",
@@ -454,6 +449,7 @@ def test_SwaggerFile_init_resources():
                     "type": "array",
                 }
             ],
+            "",
         ),
     }
 
@@ -471,34 +467,6 @@ def test_AnsibleModuleBase():
     definitions = rm.Definitions(my_definitions)
     module = rm.AnsibleModuleBase(resources["vcenter_vm"], definitions)
     assert module.name == "vcenter_vm"
-
-
-# AnsibleInfoModule
-def test_AnsibleInfoModule_parameters():
-    paths = rm.SwaggerFile.load_paths(my_raw_paths_data)
-    resources = rm.SwaggerFile.init_resources(paths.values())
-    definitions = rm.Definitions(my_definitions)
-    module = rm.AnsibleInfoModule(resources["vcenter_vm"], definitions)
-    assert module.name == "vcenter_vm_info"
-    assert module.parameters() == [
-        {
-            "collectionFormat": "multi",
-            "description": "desc of multi",
-            "in": "query",
-            "items": {"type": "string"},
-            "name": "filter.vms",
-            "operationIds": ["list"],
-            "type": "array",
-        },
-        {
-            "description": "Id of the VM Required with I(state=['get'])",
-            "in": "path",
-            "name": "vm",
-            "operationIds": ["get"],
-            "required_if": ["get"],
-            "type": "string",
-        },
-    ]
 
 
 # AnsibleModule
