@@ -1,12 +1,9 @@
 #!/usr/bin/env python3
 
-import argparse
 import ast
-import collections
 import json
 import re
 import pathlib
-import subprocess
 import astunparse
 import os
 
@@ -254,11 +251,11 @@ class AnsibleModuleBase:
 
         return sorted(results.values(), key=lambda item: item["name"])
 
-    def gen_url_func(self):
+    def gen_url_func(self, app):
         first_operation = list(self.resource.operations.values())[0]
         path = first_operation[1]
         basePath = first_operation[3]
-        url_func = ast.parse(self.URL.format(path=path, basePath=basePath)).body[0]
+        url_func = ast.parse(self.URL.format(app=app, path=path, basePath=basePath)).body[0]
         return url_func
 
     @staticmethod
@@ -310,7 +307,7 @@ class AnsibleModuleBase:
     def in_query_parameters(self):
         return [p["name"] for p in self.parameters() if p.get("in") == "query"]
 
-    def renderer(self, target_dir):
+    def renderer(self, target_dir, vendor, app):
         DEFAULT_MODULE = """
 _HEADER='''
 #!/usr/bin/env python
@@ -345,35 +342,31 @@ try:
     from ansible_module.turbo.module import AnsibleTurboModule as AnsibleModule
 except ImportError:
     from ansible.module_utils.basic import AnsibleModule
-from ansible_collections.vendor.app.plugins.module_utils.app import (
+from ansible_collections.{vendor}.{app}.plugins.module_utils.{app} import (
     gen_args,
     open_session,
     update_changed_flag)
 
 
-
 def prepare_argument_spec():
     argument_spec = {{
-        "app_hostname": dict(
+        "{app}_hostname": dict(
             type='str',
             required=False,
-            fallback=(env_fallback, ['APP_HOST']),
+            fallback=(env_fallback, ['{APP}_HOST']),
         ),
-        "app_username": dict(
+        "{app}_username": dict(
             type='str',
             required=False,
-            fallback=(env_fallback, ['APP_USER']),
+            fallback=(env_fallback, ['{APP}_USER']),
         ),
-        "app_password": dict(
+        "{app}_password": dict(
             type='str',
             required=False,
             no_log=True,
-            fallback=(env_fallback, ['APP_PASSWORD']),
+            fallback=(env_fallback, ['{APP}_PASSWORD']),
         )
     }}
-
-
-
 
     return argument_spec
 
@@ -383,8 +376,6 @@ async def get_device_info(params, session, _url, _key):
         entry = _json['value']
         entry['_key'] = _key
         return entry
-
-
 
 async def list_devices(params, session):
     existing_entries = []
@@ -400,7 +391,7 @@ async def list_devices(params, session):
 async def main( ):
     module_args = prepare_argument_spec()
     module = AnsibleModule(argument_spec=module_args, supports_check_mode=True)
-    session = await open_session(app_hostname=module.params['app_hostname'], app_username=module.params['app_username'], app_password=module.params['app_password'])
+    session = await open_session({app}_hostname=module.params['{app}_hostname'], {app}_username=module.params['{app}_username'], {app}_password=module.params['{app}_password'])
     result = await entry_point(module, session)
     module.exit_json(**result)
 
@@ -416,13 +407,13 @@ if __name__ == '__main__':
     loop.run_until_complete(main())
 
 """
-        syntax_tree = ast.parse(DEFAULT_MODULE.format(name=self.name))
+        syntax_tree = ast.parse(DEFAULT_MODULE.format(vendor=vendor, app=app, APP=app.upper()))
         arguments = gen_arguments_py(self.parameters(), self.list_index())
         documentation = format_documentation(
             gen_documentation(self.name, self.description, self.parameters())
         )
-        url_func = self.gen_url_func()
-        entry_point_func = self.gen_entry_point_func()
+        url_func = self.gen_url_func(app)
+        entry_point_func = self.gen_entry_point_func(app)
 
         in_query_parameters = self.in_query_parameters()
 
@@ -470,14 +461,14 @@ if __name__ == '__main__':
 class AnsibleModule(AnsibleModuleBase):
 
     URL = """
-return "https://{{app_hostname}}{basePath}{path}".format(**params)
+return "https://{{{app}_hostname}}{basePath}{path}".format(**params)
 """
 
     def __init__(self, resource, definitions):
         super().__init__(resource, definitions)
         self.default_operationIds = set(list(self.resource.operations.keys()))
 
-    def gen_entry_point_func(self):
+    def gen_entry_point_func(self, app):
         MAIN_FUNC = """
 async def entry_point(module, session):
     func = globals()["_" + module.params['state']]
@@ -490,7 +481,7 @@ async def entry_point(module, session):
 
             FUNC_NO_DATA_TPL = """
 async def _{operation}(params, session):
-    _url = "https://{{app_hostname}}{basePath}{path}".format(**params) + gen_args(params, IN_QUERY_PARAMETER)
+    _url = "https://{{{app}_hostname}}{basePath}{path}".format(**params) + gen_args(params, IN_QUERY_PARAMETER)
     async with session.{verb}(_url) as resp:
         content_types = ['application/json-patch+json', 'application/vnd.api+json', 'application/json']
         try:
@@ -510,7 +501,7 @@ async def _{operation}(params, session):
     for i in accepted_fields:
         if params[i]:
             spec[i] = params[i]
-    _url = "https://{{app_hostname}}{basePath}{path}".format(**params)
+    _url = "https://{{{app}_hostname}}{basePath}{path}".format(**params)
     async with session.{verb}(_url, json=spec) as resp:
         content_types = ['application/json-patch+json', 'application/vnd.api+json', 'application/json']
         try:
@@ -534,7 +525,7 @@ async def _{operation}(params, session):
             if data_accepted_fields:
                 func = ast.parse(
                     FUNC_WITH_DATA_TPL.format(
-                        operation=operation, verb=verb, path=path, basePath=basePath,
+                        app=app, operation=operation, verb=verb, path=path, basePath=basePath,
                     )
                 ).body[0]
                 func.body[0].value.elts = [
@@ -543,7 +534,7 @@ async def _{operation}(params, session):
                 ]
             else:
                 code = FUNC_NO_DATA_TPL.format(
-                    operation=operation, verb=verb, path=path, basePath=basePath
+                    app=app, operation=operation, verb=verb, path=path, basePath=basePath
                 )
                 func = ast.parse(code).body[0]
 
@@ -631,38 +622,22 @@ class SwaggerFile:
 
 def main():
 
-    parser = argparse.ArgumentParser(description="Build the modules.")
-    parser.add_argument(
-        "--black",
-        dest="black",
-        type=bool,
-        default=True,
-        help="Whether to format the generated python files with black",
-    )
-    args = parser.parse_args()
+    vendors = next(os.walk("src/swagger"))[1]
+    for vendor in vendors:
+        apps = next(os.walk("src/swagger/%s" % vendor))[1]
+        for app in apps:
+            module_list = []
+            p = pathlib.Path("src/swagger/%s/%s" % (vendor, app))
+            for json_file in p.glob("*.json"):
+                print("Generating modules from {}".format(json_file))
+                swagger_file = SwaggerFile(json_file)
+                resources = swagger_file.init_resources(swagger_file.paths.values())
 
-    directories = next(os.walk("src/swagger"))[1]
-    for directory in directories:
-        module_list = []
-        p = pathlib.Path("src/swagger/%s" % directory)
-        for json_file in p.glob("*.json"):
-            print("Generating modules from {}".format(json_file))
-            swagger_file = SwaggerFile(json_file)
-            resources = swagger_file.init_resources(swagger_file.paths.values())
-
-            for resource in resources.values():
-                module = AnsibleModule(resource, definitions=swagger_file.definitions)
-                if len(module.default_operationIds) > 0:
-                    module.renderer(pathlib.Path(pathlib.Path("build") / directory))
-                    module_list.append(module.name)
-        if args.black:
-            for module_path in [
-                "build/{directory}/plugins/modules/{module}.py".format(
-                    directory=pathlib.Path(directory), module=m
-                )
-                for m in module_list
-            ]:
-                subprocess.check_call(["black", module_path])
+                for resource in resources.values():
+                    module = AnsibleModule(resource, definitions=swagger_file.definitions)
+                    if len(module.default_operationIds) > 0:
+                        module.renderer(pathlib.Path(pathlib.Path("build") / vendor / app / "plugins" / "modules"), vendor, app)
+                        module_list.append(module.name)
 
 
 if __name__ == "__main__":
