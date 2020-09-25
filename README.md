@@ -18,5 +18,10 @@ To build the modules:
     ```bash
     tox -e refresh_modules
     ```
+3. Docs generation
+    ```bash
+    # Generate docs for each module
+    find ./plugins/modules/*.py | sed 's/.py//' | sed 's/\.\/plugins\/modules\///' | xargs -I@ bash -c "ansible-doc -t module -M ./plugins/modules @ > docs/@.txt"
+    ```
 
 The modules will be generated in `build` subdirectory.

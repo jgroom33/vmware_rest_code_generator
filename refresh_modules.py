@@ -8,6 +8,11 @@ import astunparse
 import os
 
 
+def normalize_parameter_name(name):
+    # the in-query . parameters are not valid Python variable names.
+    # We replace the . with a _ to avoid problem,
+    return name.replace(".", "_")
+
 def normalize_description(string_list):
     def _transform(my_list):
         for i in my_list:
@@ -138,13 +143,14 @@ def gen_arguments_py(parameters, list_index=None):
     ARGUMENT_TPL = """argument_spec['{name}'] = {{}}"""
 
     for parameter in parameters:
-        assign = ast.parse(ARGUMENT_TPL.format(name=parameter["name"])).body[0]
+        name = normalize_parameter_name(parameter["name"])
+        assign = ast.parse(ARGUMENT_TPL.format(name=name)).body[0]
 
-        if parameter["name"] in ["user_name", "username", "password"]:
+        if name in ["user_name", "username", "password"]:
             _add_key(assign, "nolog", True)
 
         if parameter.get("required"):
-            if list_index == parameter["name"]:
+            if list_index == name:
                 pass
             else:
                 _add_key(assign, "required", True)
@@ -174,7 +180,17 @@ class AnsibleModuleBase:
         self.default_operationIds = None
 
     def list_index(self):
-        return None
+        for i in ["get", "update", "delete"]:
+            if i not in self.resource.operations:
+                continue
+            path = self.resource.operations[i][1]
+            break
+        else:
+            return
+
+        m = re.search(r"{([-\w]+)}$", path)
+        if m:
+            return m.group(1)
 
     def parameters(self):
         def itera(operationId):
@@ -441,7 +457,7 @@ if __name__ == '__main__':
         syntax_tree = SumTransformer().visit(syntax_tree)
         syntax_tree = ast.fix_missing_locations(syntax_tree)
 
-        module_dir = target_dir / "plugins" / "modules"
+        module_dir = target_dir
         module_dir.mkdir(parents=True, exist_ok=True)
         module_py_file = module_dir / "{name}.py".format(name=self.name)
         with module_py_file.open("w") as fd:
@@ -520,6 +536,8 @@ async def _{operation}(params, session):
                 if "operationIds" in p:
                     if operation in p["operationIds"]:
                         if not p.get("in") in ["path", "query"]:
+                            data_accepted_fields.append(p["name"])
+                        elif operation in ['post', 'patch', 'put']:
                             data_accepted_fields.append(p["name"])
 
             if data_accepted_fields:
