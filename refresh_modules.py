@@ -515,7 +515,7 @@ async def _{operation}(params, session):
 
     spec = {{}}
     for i in accepted_fields:
-        if i in params:
+        if params[i] is not None:
             spec[i] = params[i]
     _url = "https://{{{app}_hostname}}{basePath}{path}".format(**params)
     async with session.{verb}(_url, json=spec) as resp:
