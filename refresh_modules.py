@@ -75,6 +75,8 @@ def gen_documentation(name, description, parameters):
                 description.append(
                     " - C({name}) ({type}): {description}".format(**subkey)
                 )
+        if "operationIds" in parameter:
+            description.append("Used by I(state={})".format(sorted(set(parameter["operationIds"]))))
         option["description"] = list(normalize_description(description))
         option["type"] = python_type(option["type"])
         if "enum" in parameter:
@@ -218,10 +220,6 @@ class AnsibleModuleBase:
                     results[name] = parameter
                     results[name]["operationIds"] = []
 
-                # Merging two parameters, for instance "action" in
-                # /rest/vcenter/vm-template/library-items/{template_library_item}/check-outs
-                # and
-                # /rest/vcenter/vm-template/library-items/{template_library_item}/check-outs/{vm}
                 if "description" not in parameter:
                     pass
                 elif "description" not in results[name]:
@@ -243,20 +241,15 @@ class AnsibleModuleBase:
             if result.get("enum"):
                 result["enum"] = sorted(set(result["enum"]))
             if result.get("required"):
-                if (
-                    len(set(self.default_operationIds) - set(result["operationIds"]))
-                    > 0
-                ):
-                    if "description" in result:
-                        result["description"] += " Required with I(state={})".format(
-                            sorted(set(result["operationIds"]))
-                        )
-                    else:
-                        result["description"] = "Required with I(state={})".format(
-                            sorted(set(result["operationIds"]))
-                        )
+                if "description" in result:
+                    result["description"] += "\nRequired with I(state={})".format(
+                        sorted(set(result["operationIds"]))
+                    )
+                else:
+                    result["description"] = "Required with I(state={})".format(
+                        sorted(set(result["operationIds"]))
+                    )
                 del result["required"]
-                result["required_if"] = sorted(set(result["operationIds"]))
 
         results["state"] = {
             "name": "state",
