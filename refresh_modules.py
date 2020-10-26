@@ -379,24 +379,6 @@ def prepare_argument_spec():
 
     return argument_spec
 
-async def get_device_info(params, session, _url, _key):
-    async with session.get(_url + '/' + _key) as resp:
-        _json = (await resp.json())
-        entry = _json['value']
-        entry['_key'] = _key
-        return entry
-
-async def list_devices(params, session):
-    existing_entries = []
-    _url = url(params)
-    async with session.get(_url) as resp:
-        _json = (await resp.json())
-        devices = _json['value']
-    for device in devices:
-        _id = list(device.values())[0]
-        existing_entries.append((await get_device_info(params, session, _url, _id)))
-    return existing_entries
-
 async def main( ):
     module_args = prepare_argument_spec()
     module = AnsibleModule(argument_spec=module_args, supports_check_mode=True)
@@ -510,7 +492,7 @@ async def _{operation}(params, session):
     for i in accepted_fields:
         if params[i] is not None:
             spec[i] = params[i]
-    _url = "https://{{{app}_hostname}}{basePath}{path}".format(**params)
+    _url = "https://{{{app}_hostname}}{basePath}{path}".format(**params) + gen_args(params, IN_QUERY_PARAMETER)
     async with session.{verb}(_url, json=spec) as resp:
         content_types = ['application/json-patch+json', 'application/vnd.api+json', 'application/json']
         try:
