@@ -13,6 +13,7 @@ def normalize_parameter_name(name):
     # We replace the . with a _ to avoid problem,
     return name.replace(".", "_")
 
+
 def normalize_description(string_list):
     def _transform(my_list):
         for i in my_list:
@@ -61,9 +62,8 @@ def gen_documentation(name, description, parameters):
 
     for parameter in parameters:
         description = []
-        option = {
-            "type": parameter["type"],
-        }
+        option = {}
+        option["type"] = parameter.get("type", "string")
         if parameter.get("required"):
             option["required"] = True
         if parameter.get("description"):
@@ -76,7 +76,9 @@ def gen_documentation(name, description, parameters):
                     " - C({name}) ({type}): {description}".format(**subkey)
                 )
         if "operationIds" in parameter:
-            description.append("Used by I(state={})".format(sorted(set(parameter["operationIds"]))))
+            description.append(
+                "Used by I(state={})".format(sorted(set(parameter["operationIds"])))
+            )
         option["description"] = list(normalize_description(description))
         option["type"] = python_type(option["type"])
         if "enum" in parameter:
@@ -125,7 +127,11 @@ def path_to_name(path):
     for idx, element in enumerate(elements):
         if "{" in element:
             elements[idx] = (
-                f"by_{element}".replace("{", "").replace("}", "").replace("=", "_eq_").replace(":", "_").lower()
+                f"by_{element}".replace("{", "")
+                .replace("}", "")
+                .replace("=", "_eq_")
+                .replace(":", "_")
+                .lower()
             )
 
     if elements[:1] == ["data"]:
@@ -157,7 +163,7 @@ def gen_arguments_py(parameters, list_index=None):
             else:
                 _add_key(assign, "required", True)
 
-        _add_key(assign, "type", python_type(parameter["type"]))
+        _add_key(assign, "type", python_type(parameter.get("type", "string")))
         if "enum" in parameter:
             _add_key(assign, "choices", sorted(parameter["enum"]))
 
@@ -232,7 +238,10 @@ class AnsibleModuleBase:
                     ):
                         results[name]["description"] = parameter["description"]
                 if "enum" in parameter:
-                    results[name]["enum"] += parameter["enum"]
+                    if "enum" not in results[name]:
+                        results[name]["enum"] = parameter["enum"]
+                    else:
+                        results[name]["enum"] += parameter["enum"]
 
                 results[name]["operationIds"].append(operationId)
                 results[name]["operationIds"].sort()
@@ -264,7 +273,9 @@ class AnsibleModuleBase:
         first_operation = list(self.resource.operations.values())[0]
         path = first_operation[1]
         basePath = first_operation[3]
-        url_func = ast.parse(self.URL.format(app=app, path=path, basePath=basePath)).body[0]
+        url_func = ast.parse(
+            self.URL.format(app=app, path=path, basePath=basePath)
+        ).body[0]
         return url_func
 
     @staticmethod
@@ -398,7 +409,9 @@ if __name__ == '__main__':
     loop.run_until_complete(main())
 
 """
-        syntax_tree = ast.parse(DEFAULT_MODULE.format(vendor=vendor, app=app, APP=app.upper()))
+        syntax_tree = ast.parse(
+            DEFAULT_MODULE.format(vendor=vendor, app=app, APP=app.upper())
+        )
         arguments = gen_arguments_py(self.parameters(), self.list_index())
         documentation = format_documentation(
             gen_documentation(self.name, self.description, self.parameters())
@@ -435,18 +448,23 @@ if __name__ == '__main__':
         module_dir = target_dir
         module_dir.mkdir(parents=True, exist_ok=True)
         module_py_file = module_dir / "{name}.py".format(name=self.name)
-        with module_py_file.open("w") as fd:
-            for l in astunparse.unparse(syntax_tree).split("\n"):
-                if l.startswith("DOCUMENTATION ="):
-                    fd.write(documentation)
-                elif l.startswith("_HEADER ="):
-                    header_lines = l.split("\\n")
-                    for header_line in header_lines[1:-1]:
-                        fd.write(header_line)
-                        fd.write("\n")
-                else:
-                    fd.write(l)
-                fd.write("\n")
+        try:
+            with module_py_file.open("w") as fd:
+                for l in astunparse.unparse(syntax_tree).split("\n"):
+                    if l.startswith("DOCUMENTATION ="):
+                        fd.write(documentation)
+                    elif l.startswith("_HEADER ="):
+                        header_lines = l.split("\\n")
+                        for header_line in header_lines[1:-1]:
+                            fd.write(header_line)
+                            fd.write("\n")
+                    else:
+                        fd.write(l)
+                    fd.write("\n")
+        except NameError as err:
+            pass
+        except AttributeError as err:
+            pass
 
 
 class AnsibleModule(AnsibleModuleBase):
@@ -512,13 +530,17 @@ async def _{operation}(params, session):
                     if operation in p["operationIds"]:
                         if not p.get("in") in ["path", "query"]:
                             data_accepted_fields.append(p["name"])
-                        elif operation in ['post', 'patch', 'put']:
+                        elif operation in ["post", "patch", "put"]:
                             data_accepted_fields.append(p["name"])
 
             if data_accepted_fields:
                 func = ast.parse(
                     FUNC_WITH_DATA_TPL.format(
-                        app=app, operation=operation, verb=verb, path=path, basePath=basePath,
+                        app=app,
+                        operation=operation,
+                        verb=verb,
+                        path=path,
+                        basePath=basePath,
                     )
                 ).body[0]
                 func.body[0].value.elts = [
@@ -527,7 +549,11 @@ async def _{operation}(params, session):
                 ]
             else:
                 code = FUNC_NO_DATA_TPL.format(
-                    app=app, operation=operation, verb=verb, path=path, basePath=basePath
+                    app=app,
+                    operation=operation,
+                    verb=verb,
+                    path=path,
+                    basePath=basePath,
                 )
                 func = ast.parse(code).body[0]
 
@@ -627,9 +653,21 @@ def main():
                 resources = swagger_file.init_resources(swagger_file.paths.values())
 
                 for resource in resources.values():
-                    module = AnsibleModule(resource, definitions=swagger_file.definitions)
+                    module = AnsibleModule(
+                        resource, definitions=swagger_file.definitions
+                    )
                     if len(module.default_operationIds) > 0:
-                        module.renderer(pathlib.Path(pathlib.Path("build") / vendor / app / "plugins" / "modules"), vendor, app)
+                        module.renderer(
+                            pathlib.Path(
+                                pathlib.Path("build")
+                                / vendor
+                                / app
+                                / "plugins"
+                                / "modules"
+                            ),
+                            vendor,
+                            app,
+                        )
                         module_list.append(module.name)
 
 
