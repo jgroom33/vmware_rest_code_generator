@@ -248,7 +248,10 @@ class AnsibleModuleBase:
 
         for name, result in results.items():
             if result.get("enum"):
-                result["enum"] = sorted(set(result["enum"]))
+                enums = []
+                for item in result["enum"]:
+                    enums.append(str(item))
+                result["enum"] = sorted(set(enums))
             if result.get("required"):
                 if "description" in result:
                     result["description"] += "\nRequired with I(state={})".format(
@@ -448,23 +451,18 @@ if __name__ == '__main__':
         module_dir = target_dir
         module_dir.mkdir(parents=True, exist_ok=True)
         module_py_file = module_dir / "{name}.py".format(name=self.name)
-        try:
-            with module_py_file.open("w") as fd:
-                for l in astunparse.unparse(syntax_tree).split("\n"):
-                    if l.startswith("DOCUMENTATION ="):
-                        fd.write(documentation)
-                    elif l.startswith("_HEADER ="):
-                        header_lines = l.split("\\n")
-                        for header_line in header_lines[1:-1]:
-                            fd.write(header_line)
-                            fd.write("\n")
-                    else:
-                        fd.write(l)
-                    fd.write("\n")
-        except NameError as err:
-            pass
-        except AttributeError as err:
-            pass
+        with module_py_file.open("w") as fd:
+            for l in astunparse.unparse(syntax_tree).split("\n"):
+                if l.startswith("DOCUMENTATION ="):
+                    fd.write(documentation)
+                elif l.startswith("_HEADER ="):
+                    header_lines = l.split("\\n")
+                    for header_line in header_lines[1:-1]:
+                        fd.write(header_line)
+                        fd.write("\n")
+                else:
+                    fd.write(l)
+                fd.write("\n")
 
 
 class AnsibleModule(AnsibleModuleBase):
