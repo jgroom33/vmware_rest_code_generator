@@ -468,7 +468,7 @@ if __name__ == '__main__':
 class AnsibleModule(AnsibleModuleBase):
 
     URL = """
-return "https://{{{app}_hostname}}{basePath}{path}".format(**params)
+return "{{{app}_hostname}}{basePath}{path}".format(**params)
 """
 
     def __init__(self, resource, definitions):
@@ -488,7 +488,7 @@ async def entry_point(module, session):
 
             FUNC_NO_DATA_TPL = """
 async def _{operation}(params, session):
-    _url = "https://{{{app}_hostname}}{basePath}{path}".format(**params) + gen_args(params, IN_QUERY_PARAMETER)
+    _url = "{{{app}_hostname}}{basePath}{path}".format(**params) + gen_args(params, IN_QUERY_PARAMETER)
     async with session.{verb}(_url) as resp:
         content_types = ['application/json-patch+json', 'application/vnd.api+json', 'application/json']
         try:
@@ -508,7 +508,7 @@ async def _{operation}(params, session):
     for i in accepted_fields:
         if params[i] is not None:
             spec[i] = params[i]
-    _url = "https://{{{app}_hostname}}{basePath}{path}".format(**params) + gen_args(params, IN_QUERY_PARAMETER)
+    _url = "{{{app}_hostname}}{basePath}{path}".format(**params) + gen_args(params, IN_QUERY_PARAMETER)
     async with session.{verb}(_url, json=spec) as resp:
         content_types = ['application/json-patch+json', 'application/vnd.api+json', 'application/json']
         try:
